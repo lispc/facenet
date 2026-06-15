@@ -34,7 +34,11 @@ def main():
     model = model_cls(embedding_dim=args.embedding_dim).to(device)
 
     ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
-    model.load_state_dict(ckpt["model_state_dict"])
+    state_dict = ckpt["model_state_dict"]
+    # 兼容 torch.compile 保存的 _orig_mod. 前缀
+    if any(k.startswith("_orig_mod.") for k in state_dict.keys()):
+        state_dict = {k.replace("_orig_mod.", "", 1): v for k, v in state_dict.items()}
+    model.load_state_dict(state_dict)
 
     transform = build_transform(args.input_size)
     eval_root = Path(args.eval_root)
