@@ -27,6 +27,7 @@ from src.data.sampler import PKBatchSampler
 from src.losses.triplet import TripletLoss
 from src.mining.mining import hard_mining, semi_hard_mining
 from src.models.facenet import NN2, NN3, NN4, NNS1, NNS2
+from src.utils.ema import ModelEMA
 
 
 # Ampere / Ada 加速默认开启 TF32，可显著提速 fp32 矩阵运算
@@ -174,6 +175,33 @@ def evaluate_bin(model, bin_path: str, device, input_size: int, eval_batch_size:
     return float(np.mean(accs)), float(np.std(accs))
 
 
+def _make_checkpoint_dict(
+    model,
+    optimizer,
+    scheduler,
+    ema: ModelEMA | None,
+    epoch: int,
+    accuracy: float,
+    global_step: int,
+    args,
+    world_size: int,
+):
+    """Build a checkpoint dict; includes EMA and scheduler state when enabled."""
+    state = {
+        "epoch": epoch,
+        "model_state_dict": model.module.state_dict() if world_size > 1 else model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "accuracy": accuracy,
+        "global_step": global_step,
+        "args": vars(args),
+    }
+    if scheduler is not None:
+        state["scheduler_state_dict"] = scheduler.state_dict()
+    if ema is not None:
+        state["ema_state_dict"] = ema.state_dict()
+    return state
+
+
 def _build_scheduler(optimizer, args, total_steps: int):
     """Build main scheduler optionally wrapped with linear warmup."""
     if args.scheduler == "cosine":
@@ -263,6 +291,7 @@ def train_one_epoch(
     args,
     writer: SummaryWriter | None,
     global_step: int,
+    ema: ModelEMA | None = None,
 ):
     model.train()
     epoch_loss = 0.0
@@ -299,6 +328,8 @@ def train_one_epoch(
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
+            if ema is not None:
+                ema.update(model)
             if scheduler is not None:
                 scheduler.step()
                 if writer is not None and args.rank == 0:
@@ -377,8 +408,24 @@ def main_worker(rank: int, world_size: int, args):
     if world_size > 1:
         model = DDP(model, device_ids=[rank])
 
-    # Loss / Optimizer / Scheduler
     criterion = TripletLoss(margin=args.margin)
+
+    # Resume (model weights first, then rebuild optimizer/scheduler if requested)
+    start_epoch = 1
+    global_step = 0
+    best_acc = 0.0
+    checkpoint = None
+    if args.resume:
+        if rank == 0:
+            print(f"Resuming from {args.resume}")
+        map_location = {"cuda:%d" % 0: "cuda:%d" % rank}
+        checkpoint = torch.load(args.resume, map_location=map_location, weights_only=False)
+        model_state = checkpoint["model_state_dict"]
+        if world_size > 1 and not any(k.startswith("module.") for k in model_state.keys()):
+            model_state = {f"module.{k}": v for k, v in model_state.items()}
+        model.load_state_dict(model_state)
+
+    # Optimizer / Scheduler / Scaler
     if args.optimizer == "adamw":
         optimizer = AdamW(
             model.parameters(),
@@ -395,24 +442,23 @@ def main_worker(rank: int, world_size: int, args):
     scheduler = _build_scheduler(optimizer, args, total_steps)
     scaler = GradScaler("cuda", enabled=args.amp)
 
-    # Resume
-    start_epoch = 1
-    global_step = 0
-    best_acc = 0.0
-    if args.resume:
-        if rank == 0:
-            print(f"Resuming from {args.resume}")
-        map_location = {"cuda:%d" % 0: "cuda:%d" % rank}
-        checkpoint = torch.load(args.resume, map_location=map_location, weights_only=False)
-        model_state = checkpoint["model_state_dict"]
-        if world_size > 1 and not any(k.startswith("module.") for k in model_state.keys()):
-            model_state = {f"module.{k}": v for k, v in model_state.items()}
-        model.load_state_dict(model_state)
-        if "optimizer_state_dict" in checkpoint:
+    # Load optimizer / scheduler state unless explicitly reset
+    if checkpoint is not None:
+        if not args.reset_optimizer and "optimizer_state_dict" in checkpoint:
             optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        start_epoch = checkpoint.get("epoch", 0) + 1
-        best_acc = checkpoint.get("accuracy", 0.0)
-        global_step = checkpoint.get("global_step", (start_epoch - 1) * num_batches)
+        if not args.reset_scheduler and "scheduler_state_dict" in checkpoint:
+            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        if not (args.reset_optimizer or args.reset_scheduler):
+            start_epoch = checkpoint.get("epoch", 0) + 1
+            best_acc = checkpoint.get("accuracy", 0.0)
+            global_step = checkpoint.get("global_step", (start_epoch - 1) * num_batches)
+
+    # Exponential Moving Average
+    ema = None
+    if args.ema_decay > 0.0:
+        ema = ModelEMA(model, decay=args.ema_decay)
+        if checkpoint is not None and "ema_state_dict" in checkpoint:
+            ema.load_state_dict(checkpoint["ema_state_dict"])
 
     # LFW eval setup
     lfw_dataset = None
@@ -435,6 +481,7 @@ def main_worker(rank: int, world_size: int, args):
             args,
             writer,
             global_step,
+            ema,
         )
 
         if rank == 0:
@@ -443,105 +490,98 @@ def main_worker(rank: int, world_size: int, args):
                 f"valid_triplet_frac={avg_valid_frac:.2%} | lr={optimizer.param_groups[0]['lr']:.2e}"
             )
 
-            # LFW eval (image folder)
-            if lfw_dataset is not None and pairs_folds is not None:
-                mean_acc, std_acc = evaluate_lfw(
-                    model, lfw_dataset, pairs_folds, device, eval_batch_size=args.eval_batch_size
-                )
-                print(f"LFW: {mean_acc * 100:.2f}% ± {std_acc * 100:.2f}%")
-                if writer is not None:
-                    writer.add_scalar("lfw/mean_accuracy", mean_acc, epoch)
-                    writer.add_scalar("lfw/std_accuracy", std_acc, epoch)
+            # Evaluate and save using the EMA shadow weights when available
+            if ema is not None:
+                ema.apply(model)
+            try:
+                # LFW eval (image folder)
+                if lfw_dataset is not None and pairs_folds is not None:
+                    mean_acc, std_acc = evaluate_lfw(
+                        model, lfw_dataset, pairs_folds, device, eval_batch_size=args.eval_batch_size
+                    )
+                    print(f"LFW: {mean_acc * 100:.2f}% ± {std_acc * 100:.2f}%")
+                    if writer is not None:
+                        writer.add_scalar("lfw/mean_accuracy", mean_acc, epoch)
+                        writer.add_scalar("lfw/std_accuracy", std_acc, epoch)
 
-                if mean_acc > best_acc:
-                    best_acc = mean_acc
-                    ckpt_path = os.path.join(args.output_dir, "best.pth")
+                    if mean_acc > best_acc:
+                        best_acc = mean_acc
+                        ckpt_path = os.path.join(args.output_dir, "best.pth")
+                        torch.save(
+                            _make_checkpoint_dict(
+                                model, optimizer, scheduler, ema, epoch, best_acc, global_step, args, world_size
+                            ),
+                            ckpt_path,
+                        )
+                        print(f"Saved best checkpoint -> {ckpt_path}")
+
+                # LFW eval (InsightFace .bin)
+                if args.lfw_bin:
+                    mean_acc, std_acc = evaluate_bin(
+                        model, args.lfw_bin, device, args.input_size, args.eval_batch_size
+                    )
+                    print(f"LFW(bin): {mean_acc * 100:.2f}% ± {std_acc * 100:.2f}%")
+                    if writer is not None:
+                        writer.add_scalar("lfw_bin/mean_accuracy", mean_acc, epoch)
+                        writer.add_scalar("lfw_bin/std_accuracy", std_acc, epoch)
+
+                    if mean_acc > best_acc:
+                        best_acc = mean_acc
+                        ckpt_path = os.path.join(args.output_dir, "best.pth")
+                        torch.save(
+                            _make_checkpoint_dict(
+                                model, optimizer, scheduler, ema, epoch, best_acc, global_step, args, world_size
+                            ),
+                            ckpt_path,
+                        )
+                        print(f"Saved best checkpoint -> {ckpt_path}")
+
+                if args.cfp_fp_bin:
+                    mean_acc, std_acc = evaluate_bin(
+                        model, args.cfp_fp_bin, device, args.input_size, args.eval_batch_size
+                    )
+                    print(f"CFP-FP: {mean_acc * 100:.2f}% ± {std_acc * 100:.2f}%")
+                    if writer is not None:
+                        writer.add_scalar("cfp_fp/mean_accuracy", mean_acc, epoch)
+                        writer.add_scalar("cfp_fp/std_accuracy", std_acc, epoch)
+
+                if args.agedb_30_bin:
+                    mean_acc, std_acc = evaluate_bin(
+                        model, args.agedb_30_bin, device, args.input_size, args.eval_batch_size
+                    )
+                    print(f"AgeDB-30: {mean_acc * 100:.2f}% ± {std_acc * 100:.2f}%")
+                    if writer is not None:
+                        writer.add_scalar("agedb_30/mean_accuracy", mean_acc, epoch)
+                        writer.add_scalar("agedb_30/std_accuracy", std_acc, epoch)
+
+                if args.save_every > 0 and epoch % args.save_every == 0:
+                    ckpt_path = os.path.join(args.output_dir, f"epoch_{epoch:03d}.pth")
                     torch.save(
-                        {
-                            "epoch": epoch,
-                            "model_state_dict": model.module.state_dict() if world_size > 1 else model.state_dict(),
-                            "optimizer_state_dict": optimizer.state_dict(),
-                            "accuracy": mean_acc,
-                            "global_step": global_step,
-                            "args": vars(args),
-                        },
+                        _make_checkpoint_dict(
+                            model, optimizer, scheduler, ema, epoch, best_acc, global_step, args, world_size
+                        ),
                         ckpt_path,
                     )
-                    print(f"Saved best checkpoint -> {ckpt_path}")
-
-            # LFW eval (InsightFace .bin)
-            if args.lfw_bin:
-                mean_acc, std_acc = evaluate_bin(
-                    model, args.lfw_bin, device, args.input_size, args.eval_batch_size
-                )
-                print(f"LFW(bin): {mean_acc * 100:.2f}% ± {std_acc * 100:.2f}%")
-                if writer is not None:
-                    writer.add_scalar("lfw_bin/mean_accuracy", mean_acc, epoch)
-                    writer.add_scalar("lfw_bin/std_accuracy", std_acc, epoch)
-
-                if mean_acc > best_acc:
-                    best_acc = mean_acc
-                    ckpt_path = os.path.join(args.output_dir, "best.pth")
-                    torch.save(
-                        {
-                            "epoch": epoch,
-                            "model_state_dict": model.module.state_dict() if world_size > 1 else model.state_dict(),
-                            "optimizer_state_dict": optimizer.state_dict(),
-                            "accuracy": mean_acc,
-                            "global_step": global_step,
-                            "args": vars(args),
-                        },
-                        ckpt_path,
-                    )
-                    print(f"Saved best checkpoint -> {ckpt_path}")
-
-            if args.cfp_fp_bin:
-                mean_acc, std_acc = evaluate_bin(
-                    model, args.cfp_fp_bin, device, args.input_size, args.eval_batch_size
-                )
-                print(f"CFP-FP: {mean_acc * 100:.2f}% ± {std_acc * 100:.2f}%")
-                if writer is not None:
-                    writer.add_scalar("cfp_fp/mean_accuracy", mean_acc, epoch)
-                    writer.add_scalar("cfp_fp/std_accuracy", std_acc, epoch)
-
-            if args.agedb_30_bin:
-                mean_acc, std_acc = evaluate_bin(
-                    model, args.agedb_30_bin, device, args.input_size, args.eval_batch_size
-                )
-                print(f"AgeDB-30: {mean_acc * 100:.2f}% ± {std_acc * 100:.2f}%")
-                if writer is not None:
-                    writer.add_scalar("agedb_30/mean_accuracy", mean_acc, epoch)
-                    writer.add_scalar("agedb_30/std_accuracy", std_acc, epoch)
-
-            if args.save_every > 0 and epoch % args.save_every == 0:
-                ckpt_path = os.path.join(args.output_dir, f"epoch_{epoch:03d}.pth")
-                torch.save(
-                    {
-                        "epoch": epoch,
-                        "model_state_dict": model.module.state_dict() if world_size > 1 else model.state_dict(),
-                        "optimizer_state_dict": optimizer.state_dict(),
-                        "accuracy": best_acc,
-                        "global_step": global_step,
-                        "args": vars(args),
-                    },
-                    ckpt_path,
-                )
-                print(f"Saved periodic checkpoint -> {ckpt_path}")
+                    print(f"Saved periodic checkpoint -> {ckpt_path}")
+            finally:
+                if ema is not None:
+                    ema.restore(model)
 
     if rank == 0:
         final_path = os.path.join(args.output_dir, "final.pth")
-        torch.save(
-            {
-                "epoch": args.epochs,
-                "model_state_dict": model.module.state_dict() if world_size > 1 else model.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "accuracy": best_acc,
-                "global_step": global_step,
-                "args": vars(args),
-            },
-            final_path,
-        )
-        print(f"Saved final checkpoint -> {final_path}")
+        if ema is not None:
+            ema.apply(model)
+        try:
+            torch.save(
+                _make_checkpoint_dict(
+                    model, optimizer, scheduler, ema, args.epochs, best_acc, global_step, args, world_size
+                ),
+                final_path,
+            )
+            print(f"Saved final checkpoint -> {final_path}")
+        finally:
+            if ema is not None:
+                ema.restore(model)
         writer.close()
 
     cleanup_distributed()
@@ -608,6 +648,9 @@ def main():
     parser.add_argument("--local_rank", type=int, default=0)
     parser.add_argument("--save_every", type=int, default=0, help="Save checkpoint every N epochs (0=disabled)")
     parser.add_argument("--resume", type=str, default=None, help="Resume from checkpoint path")
+    parser.add_argument("--reset_optimizer", action="store_true", help="Reset optimizer state when resuming")
+    parser.add_argument("--reset_scheduler", action="store_true", help="Reset LR scheduler state when resuming")
+    parser.add_argument("--ema_decay", type=float, default=0.0, help="EMA decay (0=disabled). Typical: 0.9999")
     parser.add_argument("--eval_batch_size", type=int, default=64, help="Batch size for LFW inference")
 
     args = parser.parse_args()
