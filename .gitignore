@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Data & checkpoints
+data/
+checkpoints/
+logs/
+*.log
+*.mdb
+*.lock
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Training artifacts
+*.pth
+*.pt
+*.ckpt
+events.out.tfevents.*
+
+# Papers / docs binary
+*.pdf

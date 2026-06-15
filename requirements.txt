@@ -1,0 +1,17 @@
+torch>=2.0.0
+torchvision>=0.15.0
+numpy>=1.24.0
+scipy>=1.10.0
+scikit-learn>=1.2.0
+opencv-python>=4.7.0
+Pillow>=9.5.0
+tqdm>=4.65.0
+tensorboard>=2.13.0
+matplotlib>=3.7.0
+pandas>=2.0.0
+lmdb>=1.4.1
+
+# Optional: for reading .rec with official mxnet implementation.
+# mxnet 1.9.1 is unmaintained and incompatible with numpy>=1.24 out of the box;
+# the code falls back to a pure-Python recordio reader if mxnet is unavailable.
+# mxnet>=1.9.1
