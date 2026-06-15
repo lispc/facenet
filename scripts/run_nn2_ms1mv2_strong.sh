@@ -31,7 +31,9 @@ torchrun --nproc_per_node=4 train.py \
   --grad_clip 1.0 \
   --mining semi-hard \
   --amp \
+  --compile \
   --num_workers 8 \
+  --prefetch_factor 8 \
   --save_every 5 \
   --eval_batch_size 128 \
   --lfw_bin ./data/casia-webface/eval/lfw.bin \

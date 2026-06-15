@@ -29,6 +29,11 @@ from src.mining.mining import hard_mining, semi_hard_mining
 from src.models.facenet import NN2, NN3, NN4, NNS1, NNS2
 
 
+# Ampere / Ada 加速默认开启 TF32，可显著提速 fp32 矩阵运算
+torch.set_float32_matmul_precision("high")
+torch.backends.cudnn.benchmark = True
+
+
 MODEL_REGISTRY = {
     "nn2": NN2,
     "nn3": NN3,
@@ -359,17 +364,28 @@ def main_worker(rank: int, world_size: int, args):
         batch_sampler=sampler,
         num_workers=args.num_workers,
         pin_memory=True,
+        persistent_workers=args.num_workers > 0,
+        prefetch_factor=args.prefetch_factor if args.num_workers > 0 else None,
     )
 
     # Model
     model = build_model(args).to(device)
+    if args.compile:
+        if rank == 0:
+            print("Compiling model with torch.compile...")
+        model = torch.compile(model)
     if world_size > 1:
         model = DDP(model, device_ids=[rank])
 
     # Loss / Optimizer / Scheduler
     criterion = TripletLoss(margin=args.margin)
     if args.optimizer == "adamw":
-        optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+        optimizer = AdamW(
+            model.parameters(),
+            lr=args.lr,
+            weight_decay=args.weight_decay,
+            fused=args.fused_adamw and torch.cuda.is_available(),
+        )
     elif args.optimizer == "sgd":
         optimizer = SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=args.weight_decay)
     else:
@@ -563,6 +579,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=None, help="deprecated, use --p and --k")
     parser.add_argument("--accum_steps", type=int, default=1)
     parser.add_argument("--num_workers", type=int, default=8)
+    parser.add_argument("--prefetch_factor", type=int, default=4, help="DataLoader prefetch factor")
 
     # Loss / Mining
     parser.add_argument("--margin", type=float, default=0.2)
@@ -578,6 +595,11 @@ def main():
     parser.add_argument("--warmup_batches", type=int, default=0, help="Linear warmup steps at start")
     parser.add_argument("--grad_clip", type=float, default=0.0, help="Gradient clipping max norm (0=disabled)")
 
+    # Speed optimizations
+    parser.add_argument("--compile", action="store_true", help="Compile model with torch.compile")
+    parser.add_argument("--fused_adamw", action="store_true", default=True)
+    parser.add_argument("--no_fused_adamw", action="store_true", dest="fused_adamw_false")
+
     # System
     parser.add_argument("--amp", action="store_true", default=True)
     parser.add_argument("--no_amp", action="store_true")
@@ -591,6 +613,8 @@ def main():
     args = parser.parse_args()
     if args.no_amp:
         args.amp = False
+    if args.fused_adamw_false:
+        args.fused_adamw = False
 
     # 支持 torchrun 启动，也支持直接 python train.py 多卡 spawn
     if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
