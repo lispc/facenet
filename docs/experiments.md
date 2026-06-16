@@ -175,7 +175,49 @@ Epoch 4 LFW 回落至 97.52%，整体进入平台期，因此停止并切换为 
 
 ---
 
+## 实验 6：ResNet100-IR + Triplet 单变量对照（进行中）
+
+**目标**：只把 backbone 从 NN2 换成 ResNet100-IR，其余（Triplet Loss、MS1MV2 数据、224×224、128-D embedding、AdamW lr=1e-3、cosine scheduler 等）保持不变，验证 backbone 容量的影响。
+
+### 实现
+
+- 新增 `src/models/iresnet.py`：InsightFace 风格 IResNet50 / IResNet100（pre-activation + PReLU），输出 L2 归一化 128-D embedding。
+- 在 `train.py` 注册 `iresnet50` / `iresnet100`。
+- 为 IResNet 增加 `--use_checkpoint` 梯度检查点，以在 4×RTX 3090 24GB 上训练 52M 参数的 ResNet100。
+
+### 显存限制与配置调整
+
+| 项目 | NN2 baseline | ResNet100 目标 | 实际可运行 |
+|------|--------------|----------------|------------|
+| P / K | 64 / 16 | 64 / 16 | **32 / 8** |
+| 全局 batch | 1024 | 1024 | **256** |
+| 每 GPU batch | 256 | 256 | **32** |
+| 每 epoch steps | 1000 | 1000 | **4000** |
+| 每 epoch 样本数 | ~1.02M | ~1.02M | **~1.02M** |
+| Gradient checkpointing | 否 | 否 | **是** |
+
+- P=64 K=16 / P=32 K=16 在 24GB 上均 OOM。
+- 通过打开 `--use_checkpoint` 并将 P/K 降到 32/8，同时把 step 数×4，保持每 epoch 总样本数与 NN2 baseline 相同。
+
+### 运行命令
+
+```bash
+bash scripts/run_resnet100_ms1mv2_triplet.sh
+```
+
+- 输出目录：`checkpoints/resnet100_ms1mv2_lmdb_p32k8_30ep_triplet`
+- 日志：`checkpoints/resnet100_ms1mv2_lmdb_p32k8_30ep_triplet/train.log`
+
+### 预期与风险
+
+- **预期**：ResNet100-IR 容量远大于 NN2，LFW 应显著高于 97.65%，有望接近公开 ArcFace/InsightFace 报告的 99%+。
+- **风险**：
+  - K=8 导致每个 anchor 只有 7 个 negatives，semi-hard mining 的负样本池变小，可能需要更长时间收敛。
+  - Gradient checkpointing + torch.compile 使每步耗时增加；完整 30 epoch 预计约 2–4 天。
+
+---
+
 ## 下一步
 
-- **实验 6**：把 backbone 从 NN2 换成 **ResNet100-IR**，其余（Triplet Loss、数据、训练参数、224×224、128-D embedding）保持不变，做单变量对照，确认 backbone 容量的影响。
-- 若 ResNet100 + Triplet 显著超越 NN2，再在其基础上切换 ArcFace，与公开指标对齐。
+- 等待实验 6（ResNet100-IR + Triplet）跑完，对比 NN2 baseline。
+- 若 ResNet100 + Triplet 显著超越 NN2，再在其基础上切换 ArcFace，进一步与公开指标对齐。

@@ -15,7 +15,12 @@
 - 已完成 **ArcFace 对照实验**：
   - Naive 直接切换 ArcFace 会破坏 backbone，指标持续下跌。
   - 采用 **freeze backbone 5 epochs** 训练 ArcFace head 后，最终 best 为 LFW **97.65%**，小幅超过 Triplet 基线。
-- 下一步：把 backbone 换成 **ResNet100-IR**，其余保持不变，做单变量对照。
+- **ResNet100-IR 对照实验已启动**：
+  - 新增 `src/models/iresnet.py`（IResNet50/100）并注册到 `train.py`。
+  - 为 ResNet100 增加 `--use_checkpoint` 梯度检查点，使其在 4×RTX 3090 24GB 上可训练。
+  - 由于显存限制，实际使用 **P=32 K=8，num_batches_per_epoch=4000**（全局 batch 256，每 epoch 约 1M 样本，与 NN2 baseline 总样本数相当）。
+  - 运行脚本：`scripts/run_resnet100_ms1mv2_triplet.sh`。
+  - 输出目录：`checkpoints/resnet100_ms1mv2_lmdb_p32k8_30ep_triplet`。
 - 详细实验日志见 [`docs/experiments.md`](./experiments.md)。
 
 ---
