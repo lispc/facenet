@@ -24,6 +24,7 @@ from src.data.dataset import FaceDataset, MXFaceDataset
 from src.data.lfw import LFWDataset, load_lfw_pairs
 from src.data.lmdb_dataset import LMDBFaceDataset
 from src.data.sampler import PKBatchSampler
+from src.losses.arcface import ArcFaceLoss
 from src.losses.triplet import TripletLoss
 from src.mining.mining import hard_mining, semi_hard_mining
 from src.models.facenet import NN2, NN3, NN4, NNS1, NNS2
@@ -305,18 +306,22 @@ def train_one_epoch(
 
         with autocast("cuda", enabled=args.amp):
             embeddings = model(images)
-            if args.mining == "semi-hard":
-                triplets = semi_hard_mining(
-                    embeddings, labels, margin=args.margin, max_triplets=args.max_triplets
-                )
-            elif args.mining == "hard":
-                triplets = hard_mining(
-                    embeddings, labels, max_triplets=args.max_triplets
-                )
+            if args.loss == "triplet":
+                if args.mining == "semi-hard":
+                    triplets = semi_hard_mining(
+                        embeddings, labels, margin=args.margin, max_triplets=args.max_triplets
+                    )
+                elif args.mining == "hard":
+                    triplets = hard_mining(
+                        embeddings, labels, max_triplets=args.max_triplets
+                    )
+                else:
+                    raise ValueError(f"Unknown mining: {args.mining}")
+                loss, stats = criterion(embeddings, labels, triplets)
+            elif args.loss == "arcface":
+                loss, stats = criterion(embeddings, labels)
             else:
-                raise ValueError(f"Unknown mining: {args.mining}")
-
-            loss, stats = criterion(embeddings, labels, triplets)
+                raise ValueError(f"Unknown loss: {args.loss}")
             loss = loss / args.accum_steps
 
         scaler.scale(loss).backward()
@@ -347,14 +352,20 @@ def train_one_epoch(
                 writer.add_scalar("train/valid_triplet_frac", stats["frac_valid"], global_step)
                 writer.add_scalar("train/d_ap", stats["d_ap_mean"], global_step)
                 writer.add_scalar("train/d_an", stats["d_an_mean"], global_step)
+                if "accuracy" in stats:
+                    writer.add_scalar("train/accuracy", stats["accuracy"], global_step)
 
             if isinstance(pbar, tqdm):
-                pbar.set_postfix(
-                    loss=f"{batch_loss:.4f}",
-                    valid=f"{stats['frac_valid']:.2%}",
-                    d_ap=f"{stats['d_ap_mean']:.3f}",
-                    d_an=f"{stats['d_an_mean']:.3f}",
-                )
+                postfix = {
+                    "loss": f"{batch_loss:.4f}",
+                    "valid": f"{stats['frac_valid']:.2%}",
+                }
+                if "accuracy" in stats:
+                    postfix["acc"] = f"{stats['accuracy']:.2%}"
+                else:
+                    postfix["d_ap"] = f"{stats['d_ap_mean']:.3f}"
+                    postfix["d_an"] = f"{stats['d_an_mean']:.3f}"
+                pbar.set_postfix(postfix)
 
     avg_loss = epoch_loss / len(dataloader) if len(dataloader) > 0 else 0.0
     avg_valid_frac = epoch_valid / max(epoch_total, 1)
@@ -399,6 +410,12 @@ def main_worker(rank: int, world_size: int, args):
         prefetch_factor=args.prefetch_factor if args.num_workers > 0 else None,
     )
 
+    # Infer number of identities for ArcFace if not provided
+    if args.num_classes <= 0:
+        args.num_classes = int(dataset.labels.max().item()) + 1
+        if rank == 0:
+            print(f"Inferred num_classes={args.num_classes}")
+
     # Model
     model = build_model(args).to(device)
     if args.compile:
@@ -408,7 +425,17 @@ def main_worker(rank: int, world_size: int, args):
     if world_size > 1:
         model = DDP(model, device_ids=[rank])
 
-    criterion = TripletLoss(margin=args.margin)
+    if args.loss == "triplet":
+        criterion = TripletLoss(margin=args.margin)
+    elif args.loss == "arcface":
+        criterion = ArcFaceLoss(
+            num_classes=args.num_classes,
+            embedding_dim=args.embedding_dim,
+            margin=args.arcface_margin,
+            scale=args.arcface_scale,
+        ).to(device)
+    else:
+        raise ValueError(f"Unknown loss: {args.loss}")
 
     # Resume (model weights first, then rebuild optimizer/scheduler if requested)
     start_epoch = 1
@@ -423,7 +450,16 @@ def main_worker(rank: int, world_size: int, args):
         model_state = checkpoint["model_state_dict"]
         if world_size > 1 and not any(k.startswith("module.") for k in model_state.keys()):
             model_state = {f"module.{k}": v for k, v in model_state.items()}
-        model.load_state_dict(model_state)
+        # ArcFace introduces a new classification head; allow missing keys when
+        # resuming from a Triplet-trained checkpoint.
+        strict = True
+        if args.loss == "arcface":
+            prev_loss = checkpoint.get("args", {}).get("loss", "triplet")
+            if prev_loss != "arcface":
+                strict = False
+                if rank == 0:
+                    print("Loading backbone with strict=False (new ArcFace head)")
+        model.load_state_dict(model_state, strict=strict)
 
     # Optimizer / Scheduler / Scaler
     if args.optimizer == "adamw":
@@ -457,7 +493,7 @@ def main_worker(rank: int, world_size: int, args):
     ema = None
     if args.ema_decay > 0.0:
         ema = ModelEMA(model, decay=args.ema_decay)
-        if checkpoint is not None and "ema_state_dict" in checkpoint:
+        if checkpoint is not None and "ema_state_dict" in checkpoint and not args.reset_ema:
             ema.load_state_dict(checkpoint["ema_state_dict"])
 
     # LFW eval setup
@@ -485,9 +521,13 @@ def main_worker(rank: int, world_size: int, args):
         )
 
         if rank == 0:
+            if args.loss == "triplet":
+                metric_str = f"valid_triplet_frac={avg_valid_frac:.2%}"
+            else:
+                metric_str = f"acc={avg_valid_frac:.2%}"
             print(
                 f"Epoch {epoch}/{args.epochs} | loss={avg_loss:.4f} | "
-                f"valid_triplet_frac={avg_valid_frac:.2%} | lr={optimizer.param_groups[0]['lr']:.2e}"
+                f"{metric_str} | lr={optimizer.param_groups[0]['lr']:.2e}"
             )
 
             # Evaluate and save using the EMA shadow weights when available
@@ -588,7 +628,7 @@ def main_worker(rank: int, world_size: int, args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train FaceNet with Triplet Loss")
+    parser = argparse.ArgumentParser(description="Train FaceNet with Triplet or ArcFace Loss")
 
     # Data
     parser.add_argument("--data_root", type=str, required=True)
@@ -622,9 +662,13 @@ def main():
     parser.add_argument("--prefetch_factor", type=int, default=4, help="DataLoader prefetch factor")
 
     # Loss / Mining
+    parser.add_argument("--loss", type=str, default="triplet", choices=["triplet", "arcface"])
     parser.add_argument("--margin", type=float, default=0.2)
     parser.add_argument("--mining", type=str, default="semi-hard", choices=["semi-hard", "hard"])
     parser.add_argument("--max_triplets", type=int, default=None)
+    parser.add_argument("--num_classes", type=int, default=0, help="Number of identities for ArcFace (0=auto)")
+    parser.add_argument("--arcface_margin", type=float, default=0.5, help="ArcFace angular margin")
+    parser.add_argument("--arcface_scale", type=float, default=64.0, help="ArcFace feature scale")
 
     # Optimizer / Scheduler
     parser.add_argument("--optimizer", type=str, default="adamw", choices=["adamw", "sgd"])
@@ -650,6 +694,7 @@ def main():
     parser.add_argument("--resume", type=str, default=None, help="Resume from checkpoint path")
     parser.add_argument("--reset_optimizer", action="store_true", help="Reset optimizer state when resuming")
     parser.add_argument("--reset_scheduler", action="store_true", help="Reset LR scheduler state when resuming")
+    parser.add_argument("--reset_ema", action="store_true", help="Reset EMA shadow weights when resuming")
     parser.add_argument("--ema_decay", type=float, default=0.0, help="EMA decay (0=disabled). Typical: 0.9999")
     parser.add_argument("--eval_batch_size", type=int, default=64, help="Batch size for LFW inference")
 
