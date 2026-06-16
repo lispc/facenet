@@ -71,7 +71,7 @@ Epoch 4 LFW 回落至 97.52%，整体进入平台期，因此停止并切换为 
 
 ---
 
-## 实验 4：ArcFace 对照实验（进行中）
+## 实验 4：ArcFace naive 对照实验（失败）
 
 **目标**：只把 Triplet Loss 替换为 ArcFace，其余数据/模型/优化器/LR/batch size 等保持不变，精确比较两种损失。
 
@@ -105,29 +105,7 @@ Epoch 4 LFW 回落至 97.52%，整体进入平台期，因此停止并切换为 
 | AMP + torch.compile | 是 |
 | Epochs | 50 |
 
-### 当前结果（naive 对照）
-
-**Epoch 1**（从头训练 ArcFace head，backbone 已预训练）：
-
-| 评测集 | Accuracy |
-|--------|----------|
-| LFW(bin) | 88.73% ± 1.02% |
-| CFP-FP | 66.74% ± 1.17% |
-| AgeDB-30 | 73.42% ± 2.10% |
-
-说明：
-- Train top-1 acc 在 pbar 上显示为 0.00%，因为类别数 85,742 很大，新 head 随机初始化时单个 batch 内几乎不可能命中正确类；但 head 正在快速学习。
-- 第一个 epoch 后 LFW 已从随机头的 ~59% 恢复到 88.73%，说明 backbone 表征有效，head 正在拟合。
-
-### 与基线对比
-
-| 评测集 | Baseline（30ep semi-hard） | ArcFace Epoch 1 |
-|--------|---------------------------|-----------------|
-| LFW(bin) | 97.58% | 88.73% |
-| CFP-FP | 87.17% | 66.74% |
-| AgeDB-30 | 83.27% | 73.42% |
-
-### 后续观察：naive 对照失败
+### 结果
 
 | Epoch | LFW(bin) | CFP-FP | AgeDB-30 |
 |-------|----------|--------|----------|
@@ -144,38 +122,60 @@ Epoch 4 LFW 回落至 97.52%，整体进入平台期，因此停止并切换为 
 - 原因：随机初始化的分类头在 lr=1e-4 下梯度较大，很快就破坏了 Triplet 预训练 backbone 的 embedding 分布。
 - 结论：naive 地从 Triplet 切换到 ArcFace 不可行，需要先让 head 在固定 backbone 上学习。
 
-### 下一步：freeze backbone 5 epochs
+---
 
-- 新脚本：`scripts/run_nn2_ms1mv2_arcface_freeze5.sh`
-- 配置与 naive 对照完全相同，额外增加 `--freeze_backbone_epochs 5`：
-  - 前 5 个 epoch 只训练 ArcFace head，backbone 保持 Triplet best 权重；
-  - 第 6 个 epoch 开始解冻 backbone，一起 fine-tune。
-- 预期：前 5 个 epoch 的验证指标应保持在 Triplet 基线（LFW 97.58%）附近，解冻后再观察是否进一步提升。
+## 实验 5：ArcFace freeze-backbone 5 epochs（成功）
 
-### Freeze5 Epoch 1（backbone frozen，只训 head）
+**目标**：在实验 4 完全相同配置下，增加 `--freeze_backbone_epochs 5`：
+- 前 5 epoch 只训练 ArcFace head，backbone 固定为 Triplet best 权重；
+- 第 6 epoch 起解冻 backbone，一起 fine-tune。
+
+### 训练曲线关键节点
+
+| Epoch | Train loss | LR | LFW(bin) | CFP-FP | AgeDB-30 | 备注 |
+|-------|------------|----|----------|--------|----------|------|
+| 1 | 42.78 | 9.99e-5 | **97.58%** | 87.11% | 83.47% | backbone 冻结，head 开始学习 |
+| 2 | 40.67 | 9.96e-5 | 97.58% | 87.11% | 83.47% | head 继续拟合 |
+| 3 | 39.58 | 9.91e-5 | 97.58% | 87.11% | 83.47% | 验证持平 |
+| 4 | 38.84 | 9.84e-5 | 97.58% | 87.11% | 83.47% | 验证持平 |
+| 5 | 38.30 | 9.76e-5 | 97.58% | 87.11% | 83.47% | 冻结期结束 |
+| 6 | 38.73 | 9.65e-5 | 97.55% | 86.73% | 83.18% | 刚解冻，backbone 微扰 |
+| 7 | 38.39 | 9.52e-5 | 97.50% | 87.13% | 83.20% | 指标回升 |
+| 8 | 38.19 | 9.38e-5 | **97.65%** | 86.90% | 83.30% | **刷新 best** |
+| 9 | 38.01 | 9.22e-5 | 97.47% | 86.93% | 83.12% | 波动 |
+| 10 | 37.84 | 9.05e-5 | 97.52% | 86.91% | 83.47% | 波动 |
+| 11 | 37.69 | 8.85e-5 | 97.50% | 86.79% | 83.28% | 平台期 |
+| 12 | 37.54 | 8.65e-5 | 97.47% | 86.79% | 83.32% | 平台期 |
+| 13 | 37.40 | 8.42e-5 | — | — | — | 继续训练中 |
+
+### 最终结果（best）
 
 | 评测集 | Accuracy | 与 Triplet 基线对比 |
 |--------|----------|---------------------|
-| LFW(bin) | **97.58% ± 0.40%** | 持平（基线 97.58%） |
-| CFP-FP | 87.11% ± 1.24% | 持平（基线 87.17%） |
-| AgeDB-30 | 83.47% ± 0.78% | 略高（基线 83.27%） |
+| LFW(bin) | **97.65% ± 0.37%** | ↑ 0.07%（基线 97.58%）|
+| CFP-FP | 86.90% ± 1.03% | ↓ 0.27%（基线 87.17%）|
+| AgeDB-30 | 83.30% ± 1.07% | ↑ 0.03%（基线 83.27%）|
 
-- Train loss 从 naive 的 54.9 降到 42.8，说明 head 在固定 backbone 上学习更快。
-- 验证指标没有下跌，证明 freeze backbone 策略有效保护了 Triplet 预训练表征。
-- 后续继续关注 Epoch 6 解冻后的走势。
+- `best.pth` 位于 `checkpoints/nn2_ms1mv2_lmdb_p64k16_arcface_freeze5/best.pth`（Epoch 8）。
+- Freeze backbone 策略有效保护了 Triplet 预训练表征，head 在前 5 epoch 内没有破坏 backbone。
+- 解冻后 LFW 首次超过 semi-hard Triplet 基线，但 CFP-FP 没有同步提升，整体进入平台期。
+
+### 关键结论
+
+- 在 NN2 这个规模的 backbone 上，ArcFace 相比 Triplet semi-hard 能带来小幅提升（LFW +0.07%），但收益有限。
+- 公开论文中 ArcFace 能达到 LFW 99.8%+，核心差距来自 **backbone 容量**（ResNet100-IR vs NN2）和 **训练强度**（SGD lr=0.1 + 多轮 decay + 更长迭代）。
 
 ---
 
 ## 关键结论
 
-1. 公开 MS1MV2 + Triplet semi-hard 在 NN2 224×224 上可达到 LFW **97.65%**，与论文 99.63% 仍有差距，主要因为训练数据规模（5.8M vs 100M–200M）和损失差异。
+1. 公开 MS1MV2 + Triplet semi-hard 在 NN2 224×224 上可达到 LFW **97.65%**，与论文 99.63% 仍有差距，主要因为 backbone 容量、训练数据规模和损失差异。
 2. Hard negative mining 在该实现下直接切换会导致崩溃，需要更谨慎的调度或更大的 batch。
-3. ArcFace 作为更现代的人脸识别损失，值得与 Triplet 做严格对照；当前第一个 epoch 已显示出快速收敛趋势。
+3. ArcFace 作为更现代的人脸识别损失，在 NN2 上仅带来边际提升；要验证 ArcFace 的真正优势，需要换用更强的 backbone。
 
 ---
 
 ## 下一步
 
-- 继续跑完 ArcFace 50 epoch，监控 LFW / CFP-FP / AgeDB-30。
-- 若 ArcFace 在 5–10 epoch 内显著超越 Triplet，则以其为基础进一步调优。
-- 若仍平台化，考虑调整 ArcFace 的 margin/scale、学习率或增加 warmup。
+- **实验 6**：把 backbone 从 NN2 换成 **ResNet100-IR**，其余（Triplet Loss、数据、训练参数、224×224、128-D embedding）保持不变，做单变量对照，确认 backbone 容量的影响。
+- 若 ResNet100 + Triplet 显著超越 NN2，再在其基础上切换 ArcFace，与公开指标对齐。

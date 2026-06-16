@@ -9,8 +9,13 @@
 ## 0. 当前实验状态
 
 - 已实现 NN2/NN3/NN4/NNS1/NNS2 + Triplet Loss + semi-hard/hard mining。
-- 在 MS1MV2（5.8M 图 / 85,742 人）上训练 NN2 224×224，Triplet semi-hard 基线达到 LFW **97.58%**。
-- 已完成 **ArcFace 对照实验**：仅替换 loss 会导致指标持续下降，因此改为 **freeze backbone 5 epochs 先训练 head** 的新方案。
+- 在 MS1MV2（5.8M 图 / 85,742 人）上训练 NN2 224×224：
+  - Triplet semi-hard 基线：LFW **97.58%**。
+  - EMA + 低 LR semi-hard 续训：最高 LFW **97.65%**。
+- 已完成 **ArcFace 对照实验**：
+  - Naive 直接切换 ArcFace 会破坏 backbone，指标持续下跌。
+  - 采用 **freeze backbone 5 epochs** 训练 ArcFace head 后，最终 best 为 LFW **97.65%**，小幅超过 Triplet 基线。
+- 下一步：把 backbone 换成 **ResNet100-IR**，其余保持不变，做单变量对照。
 - 详细实验日志见 [`docs/experiments.md`](./experiments.md)。
 
 ---
@@ -227,8 +232,8 @@
 
 ## 7. 下一步行动
 
-1. 确认复现目标：**完整复现（论文指标）** vs **方法级复现（验证 pipeline）** vs **教学/最小 MVP**。
-2. 确认可用 GPU 与预算，决定 batch size 与模型大小。
-3. 选择训练数据集并安排下载。
-4. 初始化代码仓库，先实现 NN4 + triplet loss + CASIA 训练。
-5. 完成 LFW 评测，验证 baseline 是否 work。
+1. ✅ 已完成 NN2 + Triplet semi-hard 基线（LFW 97.58%）。
+2. ✅ 已完成 ArcFace 对照实验，freeze backbone 5 epochs best 为 LFW 97.65%。
+3. **当前重点**：把 backbone 从 NN2 换成 **ResNet100-IR**，其余全部保持不变（Triplet Loss、MS1MV2、224×224、128-D、AdamW lr=1e-3），验证 backbone 容量对上限的影响。
+4. 在 ResNet100-IR 上进一步对比 ArcFace vs Triplet，向公开指标（LFW 99.7–99.8%）靠近。
+5. 整理代码、脚本、预训练权重与复现报告。
