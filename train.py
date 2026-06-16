@@ -29,6 +29,7 @@ from src.losses.arcface import ArcFaceLoss
 from src.losses.triplet import TripletLoss
 from src.mining.mining import hard_mining, semi_hard_mining
 from src.models.facenet import NN2, NN3, NN4, NNS1, NNS2
+from src.models.iresnet import iresnet50, iresnet100
 from src.utils.ema import ModelEMA
 
 
@@ -43,6 +44,8 @@ MODEL_REGISTRY = {
     "nn4": NN4,
     "nns1": NNS1,
     "nns2": NNS2,
+    "iresnet50": iresnet50,
+    "iresnet100": iresnet100,
 }
 
 
@@ -97,7 +100,10 @@ def build_dataset(args):
 
 def build_model(args):
     model_cls = MODEL_REGISTRY[args.model]
-    model = model_cls(embedding_dim=args.embedding_dim, dropout=args.dropout)
+    kwargs = dict(embedding_dim=args.embedding_dim, dropout=args.dropout)
+    if args.model in ("iresnet50", "iresnet100"):
+        kwargs["use_checkpoint"] = args.use_checkpoint
+    model = model_cls(**kwargs)
     return model
 
 
@@ -709,6 +715,11 @@ def main():
 
     # Speed optimizations
     parser.add_argument("--compile", action="store_true", help="Compile model with torch.compile")
+    parser.add_argument(
+        "--use_checkpoint",
+        action="store_true",
+        help="Use gradient checkpointing in the backbone (saves VRAM at the cost of speed)",
+    )
     parser.add_argument("--fused_adamw", action="store_true", default=True)
     parser.add_argument("--no_fused_adamw", action="store_true", dest="fused_adamw_false")
 
