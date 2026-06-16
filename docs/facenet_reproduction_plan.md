@@ -10,7 +10,7 @@
 
 - 已实现 NN2/NN3/NN4/NNS1/NNS2 + Triplet Loss + semi-hard/hard mining。
 - 在 MS1MV2（5.8M 图 / 85,742 人）上训练 NN2 224×224，Triplet semi-hard 基线达到 LFW **97.58%**。
-- 正在执行 **ArcFace 对照实验**：仅替换 loss，其余配置完全相同，以精确比较 Triplet 与 ArcFace。
+- 已完成 **ArcFace 对照实验**：仅替换 loss 会导致指标持续下降，因此改为 **freeze backbone 5 epochs 先训练 head** 的新方案。
 - 详细实验日志见 [`docs/experiments.md`](./experiments.md)。
 
 ---

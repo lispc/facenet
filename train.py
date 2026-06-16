@@ -1,4 +1,5 @@
 import argparse
+import itertools
 import os
 import random
 import time
@@ -293,8 +294,12 @@ def train_one_epoch(
     writer: SummaryWriter | None,
     global_step: int,
     ema: ModelEMA | None = None,
+    frozen_backbone: bool = False,
 ):
-    model.train()
+    if frozen_backbone:
+        model.eval()
+    else:
+        model.train()
     epoch_loss = 0.0
     epoch_valid = 0.0
     epoch_total = 0
@@ -464,13 +469,18 @@ def main_worker(rank: int, world_size: int, args):
     # Optimizer / Scheduler / Scaler
     if args.optimizer == "adamw":
         optimizer = AdamW(
-            model.parameters(),
+            itertools.chain(model.parameters(), criterion.parameters()),
             lr=args.lr,
             weight_decay=args.weight_decay,
             fused=args.fused_adamw and torch.cuda.is_available(),
         )
     elif args.optimizer == "sgd":
-        optimizer = SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=args.weight_decay)
+        optimizer = SGD(
+            itertools.chain(model.parameters(), criterion.parameters()),
+            lr=args.lr,
+            momentum=0.9,
+            weight_decay=args.weight_decay,
+        )
     else:
         raise ValueError(f"Unknown optimizer: {args.optimizer}")
 
@@ -496,6 +506,16 @@ def main_worker(rank: int, world_size: int, args):
         if checkpoint is not None and "ema_state_dict" in checkpoint and not args.reset_ema:
             ema.load_state_dict(checkpoint["ema_state_dict"])
 
+    # Freeze backbone for the first N epochs when using ArcFace, so the new
+    # classification head can learn on fixed embeddings before we fine-tune.
+    frozen_backbone = False
+    if args.freeze_backbone_epochs > 0 and args.loss == "arcface":
+        frozen_backbone = True
+        for p in model.parameters():
+            p.requires_grad = False
+        if rank == 0:
+            print(f"Freezing backbone for the first {args.freeze_backbone_epochs} epochs")
+
     # LFW eval setup
     lfw_dataset = None
     pairs_folds = None
@@ -505,6 +525,13 @@ def main_worker(rank: int, world_size: int, args):
         pairs_folds = load_lfw_pairs(args.lfw_pairs)
 
     for epoch in range(start_epoch, args.epochs + 1):
+        if frozen_backbone and epoch > args.freeze_backbone_epochs:
+            frozen_backbone = False
+            for p in model.parameters():
+                p.requires_grad = True
+            if rank == 0:
+                print("Unfreezing backbone")
+
         avg_loss, avg_valid_frac, global_step = train_one_epoch(
             model,
             dataloader,
@@ -518,6 +545,7 @@ def main_worker(rank: int, world_size: int, args):
             writer,
             global_step,
             ema,
+            frozen_backbone=frozen_backbone,
         )
 
         if rank == 0:
@@ -696,6 +724,7 @@ def main():
     parser.add_argument("--reset_scheduler", action="store_true", help="Reset LR scheduler state when resuming")
     parser.add_argument("--reset_ema", action="store_true", help="Reset EMA shadow weights when resuming")
     parser.add_argument("--ema_decay", type=float, default=0.0, help="EMA decay (0=disabled). Typical: 0.9999")
+    parser.add_argument("--freeze_backbone_epochs", type=int, default=0, help="Freeze backbone for N epochs when using ArcFace (only train head)")
     parser.add_argument("--eval_batch_size", type=int, default=64, help="Batch size for LFW inference")
 
     args = parser.parse_args()

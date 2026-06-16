@@ -105,7 +105,7 @@ Epoch 4 LFW 回落至 97.52%，整体进入平台期，因此停止并切换为 
 | AMP + torch.compile | 是 |
 | Epochs | 50 |
 
-### 当前结果
+### 当前结果（naive 对照）
 
 **Epoch 1**（从头训练 ArcFace head，backbone 已预训练）：
 
@@ -127,7 +127,30 @@ Epoch 4 LFW 回落至 97.52%，整体进入平台期，因此停止并切换为 
 | CFP-FP | 87.17% | 66.74% |
 | AgeDB-30 | 83.27% | 73.42% |
 
-后续继续观察 ArcFace 在 5–10 epoch 内能否追平或超越 semi-hard 基线。
+### 后续观察：naive 对照失败
+
+| Epoch | LFW(bin) | CFP-FP | AgeDB-30 |
+|-------|----------|--------|----------|
+| 1 | 88.73% | 66.74% | 73.42% |
+| 2 | 81.75% | 61.27% | 69.52% |
+| 3 | 79.32% | 56.80% | 69.42% |
+| 4 | 76.45% | 57.46% | 68.25% |
+| 5 | 75.35% | 56.21% | 64.65% |
+| 6 | 72.73% | 55.79% | 61.30% |
+| 7 | 72.25% | 55.53% | 58.27% |
+| 8 | 69.73% | 57.27% | 57.47% |
+
+- 从 Epoch 2 开始，LFW/CFP-FP/AgeDB-30 持续下降。
+- 原因：随机初始化的分类头在 lr=1e-4 下梯度较大，很快就破坏了 Triplet 预训练 backbone 的 embedding 分布。
+- 结论：naive 地从 Triplet 切换到 ArcFace 不可行，需要先让 head 在固定 backbone 上学习。
+
+### 下一步：freeze backbone 5 epochs
+
+- 新脚本：`scripts/run_nn2_ms1mv2_arcface_freeze5.sh`
+- 配置与 naive 对照完全相同，额外增加 `--freeze_backbone_epochs 5`：
+  - 前 5 个 epoch 只训练 ArcFace head，backbone 保持 Triplet best 权重；
+  - 第 6 个 epoch 开始解冻 backbone，一起 fine-tune。
+- 预期：前 5 个 epoch 的验证指标应保持在 Triplet 基线（LFW 97.58%）附近，解冻后再观察是否进一步提升。
 
 ---
 
