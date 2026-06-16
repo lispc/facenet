@@ -156,10 +156,8 @@ class IResNet(nn.Module):
         x = self.prelu1(x)
 
         for layer in (self.layer1, self.layer2, self.layer3, self.layer4):
-            # 默认只 checkpoint 最深的两个 stage，兼顾显存与速度
-            ckpt = self.use_checkpoint and self.training and layer in (self.layer3, self.layer4)
             for block in layer:
-                if ckpt:
+                if self.use_checkpoint and self.training:
                     x = checkpoint(block, x, use_reentrant=False)
                 else:
                     x = block(x)
