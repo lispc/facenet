@@ -152,6 +152,18 @@ Epoch 4 LFW 回落至 97.52%，整体进入平台期，因此停止并切换为 
   - 第 6 个 epoch 开始解冻 backbone，一起 fine-tune。
 - 预期：前 5 个 epoch 的验证指标应保持在 Triplet 基线（LFW 97.58%）附近，解冻后再观察是否进一步提升。
 
+### Freeze5 Epoch 1（backbone frozen，只训 head）
+
+| 评测集 | Accuracy | 与 Triplet 基线对比 |
+|--------|----------|---------------------|
+| LFW(bin) | **97.58% ± 0.40%** | 持平（基线 97.58%） |
+| CFP-FP | 87.11% ± 1.24% | 持平（基线 87.17%） |
+| AgeDB-30 | 83.47% ± 0.78% | 略高（基线 83.27%） |
+
+- Train loss 从 naive 的 54.9 降到 42.8，说明 head 在固定 backbone 上学习更快。
+- 验证指标没有下跌，证明 freeze backbone 策略有效保护了 Triplet 预训练表征。
+- 后续继续关注 Epoch 6 解冻后的走势。
+
 ---
 
 ## 关键结论
