@@ -1,6 +1,6 @@
 # FaceNet 复现实验记录
 
-> 本仓库主要实验日志。所有模型均为 NN2（Inception 风格），输入 224×224，embedding_dim=128，训练数据为 MS1MV2（5.8M 图 / 85,742 人），评测使用 InsightFace `.bin` 协议。
+> 本仓库主要实验日志。默认输入 224×224，embedding_dim=128，训练数据为 MS1MV2（5.8M 图 / 85,742 人），评测使用 InsightFace `.bin` 协议；模型包括 NN2（Inception 风格）与 ResNet100-IR。
 
 ---
 
@@ -208,16 +208,78 @@ bash scripts/run_resnet100_ms1mv2_triplet.sh
 - 输出目录：`checkpoints/resnet100_ms1mv2_lmdb_p32k8_30ep_triplet`
 - 日志：`checkpoints/resnet100_ms1mv2_lmdb_p32k8_30ep_triplet/train.log`
 
-### 预期与风险
+### 训练结果
 
-- **预期**：ResNet100-IR 容量远大于 NN2，LFW 应显著高于 97.65%，有望接近公开 ArcFace/InsightFace 报告的 99%+。
-- **风险**：
-  - K=8 导致每个 anchor 只有 7 个 negatives，semi-hard mining 的负样本池变小，可能需要更长时间收敛。
-  - Gradient checkpointing + torch.compile 使每步耗时增加；完整 30 epoch 预计约 2–4 天。
+训练在第 7 个 epoch 后停止（后续切换为 ArcFace 做对照）。关键节点如下：
+
+| Epoch | Train loss | valid_triplet_frac | LR | LFW(bin) | CFP-FP | AgeDB-30 | 备注 |
+|-------|------------|--------------------|----|----------|--------|----------|------|
+| 1 | 0.1018 | 99.94% | 1.00e-3 | 96.82% | 86.14% | 84.47% | 初始 warmup 中 |
+| 2 | 0.0843 | 99.89% | 9.96e-4 | 97.62% | 89.16% | 87.25% | 大幅提升 |
+| 3 | 0.0772 | 99.98% | 9.83e-4 | **98.13%** | 88.93% | 89.03% | **LFW best** |
+| 4 | 0.0772 | 99.98% | 9.63e-4 | 98.08% | 89.86% | 89.78% | 平台期 |
+| 5 | 0.0768 | 99.97% | 9.36e-4 | 98.10% | **90.00%** | 90.05% | CFP/AgeDB 继续涨 |
+| 6 | 0.0771 | 99.97% | 9.01e-4 | 97.98% | 89.86% | 90.50% | AgeDB 继续涨 |
+| 7 | 0.0772 | 99.98% | 8.78e-4 | 98.33% | **90.33%** | **90.00%** | LFW 反弹，CFP best |
+
+- `best.pth` 位于 `checkpoints/resnet100_ms1mv2_lmdb_p32k8_30ep_triplet/best.pth`（Epoch 7，按 LFW）。
+- ResNet100-IR 相较 NN2 带来显著提升：LFW 从 97.65% → **98.33%**，CFP-FP 从 87.17% → **90.33%**，AgeDB-30 从 83.27% → **90.00%**。
+- K=8 的负样本池确实使收敛更慢，但 7 个 epoch 后仍在稳步上涨；继续训练可能还有收益，但按计划在此时切换损失函数。
+
+### 风险回顾
+
+- K=8 导致每个 anchor 只有 7 个 negatives，semi-hard mining 的负样本池变小，收敛速度比大 batch 慢。
+- Gradient checkpointing + torch.compile 使每步约 2.1 s，7 epoch 约 16.5 小时。
+
+---
+
+## 实验 7：ResNet100-IR + ArcFace freeze-backbone 1 epoch 续训（进行中）
+
+**目标**：在实验 6 的 ResNet100-IR Triplet 权重基础上，只把损失替换为 ArcFace，其余尽量保持不变；第 1 epoch 冻结 backbone 只训练 head，第 2 epoch 起解冻全部参数 fine-tune。
+
+### 初始化细节
+
+- **Backbone**：从 `checkpoints/resnet100_ms1mv2_lmdb_p32k8_30ep_triplet/best.pth` 加载 ResNet100-IR 权重。
+- **ArcFace head**：全新随机初始化（`W` shape `(85742, 128)`，Xavier uniform）。
+- **Optimizer / Scheduler / EMA**：全部重置，不继承 Triplet 训练状态。
+- **冻结策略**：`--freeze_backbone_epochs 1`，第 1 epoch 只训练 ArcFace head，第 2 epoch 起所有参数一起训练。
+
+### 配置
+
+| 配置 | 值 |
+|------|-----|
+| Model | ResNet100-IR (`iresnet100`) |
+| Input size | 224×224 |
+| P / K | 32 / 8（全局 batch 256）|
+| num_batches_per_epoch | 4000 |
+| Loss | ArcFace |
+| num_classes | 85,742 |
+| ArcFace margin | 0.5 |
+| ArcFace scale | 64.0 |
+| Optimizer | AdamW，lr=1e-4，weight_decay=5e-4 |
+| Scheduler | cosine，min_lr=1e-7 |
+| EMA decay | 0.9999 |
+| Freeze backbone | 1 epoch |
+| AMP + torch.compile + gradient checkpointing | 是 |
+| Epochs | 30 |
+
+### 运行命令
+
+```bash
+bash scripts/run_resnet100_ms1mv2_arcface_freeze1.sh
+```
+
+- 输出目录：`checkpoints/resnet100_ms1mv2_lmdb_p32k8_arcface_freeze1`
+- 日志：`checkpoints/resnet100_ms1mv2_lmdb_p32k8_arcface_freeze1/train.log`
+
+### 预期
+
+- 相比 NN2 + ArcFace freeze5（LFW 97.65%），ResNet100-IR 更强的 backbone 应能进一步逼近公开 ArcFace/InsightFace 报告的 99%+。
+- 第 1 epoch 冻结 backbone 可防止随机初始化的分类头破坏 Triplet 预训练表征。
 
 ---
 
 ## 下一步
 
-- 等待实验 6（ResNet100-IR + Triplet）跑完，对比 NN2 baseline。
-- 若 ResNet100 + Triplet 显著超越 NN2，再在其基础上切换 ArcFace，进一步与公开指标对齐。
+- 等待实验 7（ResNet100-IR + ArcFace freeze1）结果，与实验 6 的 Triplet 结果严格对照。
+- 根据收敛情况决定是否进一步调整 LR、freeze epoch 数或 batch size。
