@@ -288,7 +288,8 @@ bash scripts/run_resnet100_ms1mv2_arcface_freeze1.sh
 ### 启动记录
 
 - 2025-06-17：首次启动，因后台任务默认 600 秒超时被中断（当时已跑到 Epoch 1 step 240，loss 约 44.6）。
-- 2025-06-17：使用无超时后台任务重新启动，当前 **Epoch 1 进行中**，loss 从随机初始化起点约 55.8 开始下降。
+- 2025-06-17：使用无超时后台任务重新启动。
+- 当前状态：**Epoch 2 进行中**（`82 / 4000`），loss 在 42–44 之间震荡。
 
 ### 与实验 6 完全一致的配置
 
@@ -324,6 +325,16 @@ bash scripts/run_resnet100_ms1mv2_arcface_scratch.sh
 
 - 输出目录：`checkpoints/resnet100_ms1mv2_lmdb_p32k8_30ep_arcface`
 - 日志：`checkpoints/resnet100_ms1mv2_lmdb_p32k8_30ep_arcface/train.log`
+
+### 当前结果
+
+| 阶段 | Train loss | Train acc | LFW(bin) | CFP-FP | AgeDB-30 | 备注 |
+|------|------------|-----------|----------|--------|----------|------|
+| Epoch 1 | 43.86 | 0.00% | **52.88% ± 2.03%** | 47.96% ± 1.11% | 47.70% ± 1.23% | head 刚开始学习 |
+| Epoch 2（进行中） | — | — | — | — | — | step 82，loss ~43.2 |
+
+- 与 Triplet 实验 Epoch 1 的 LFW **96.82%** 相比，ArcFace from scratch 起点明显更低，符合随机初始化分类头 + 小 batch 的预期。
+- `best.pth` 当前为 Epoch 1 检查点（LFW 52.88%）。
 
 ### 预期与风险
 
