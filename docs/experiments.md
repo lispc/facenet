@@ -233,9 +233,11 @@ bash scripts/run_resnet100_ms1mv2_triplet.sh
 
 ---
 
-## 实验 7：ResNet100-IR + ArcFace freeze-backbone 1 epoch 续训（进行中）
+## 实验 7：ResNet100-IR + ArcFace freeze-backbone 1 epoch 续训（已放弃）
 
 **目标**：在实验 6 的 ResNet100-IR Triplet 权重基础上，只把损失替换为 ArcFace，其余尽量保持不变；第 1 epoch 冻结 backbone 只训练 head，第 2 epoch 起解冻全部参数 fine-tune。
+
+**放弃原因**：训练过程中 Epoch 2 解冻 backbone 后 LFW 从 98.33% 跌至 74.38%，train loss 虽然下降但验证指标未恢复；用户决定改为做 **Triplet vs ArcFace 的严格单变量对照实验**（实验 8），因此停止本实验。
 
 ### 初始化细节
 
@@ -279,7 +281,56 @@ bash scripts/run_resnet100_ms1mv2_arcface_freeze1.sh
 
 ---
 
+## 实验 8：ResNet100-IR + ArcFace（from scratch）单变量对照（进行中）
+
+**目标**：与实验 6 的 ResNet100-IR + Triplet 做严格单变量对照，**仅把 loss 从 Triplet 替换为 ArcFace**，其余配置（网络、数据、输入尺寸、embedding_dim、batch size、优化器、LR、scheduler、epochs 等）完全一致。
+
+### 启动记录
+
+- 2025-06-17：首次启动，因后台任务默认 600 秒超时被中断（当时已跑到 Epoch 1 step 240，loss 约 44.6）。
+- 2025-06-17：使用无超时后台任务重新启动，当前 **Epoch 1 进行中**，loss 从随机初始化起点约 55.8 开始下降。
+
+### 与实验 6 完全一致的配置
+
+| 配置 | 值 |
+|------|-----|
+| Model | ResNet100-IR (`iresnet100`) |
+| Input size | 224×224 |
+| Embedding dim | 128 |
+| P / K | 32 / 8（全局 batch 256）|
+| num_batches_per_epoch | 4000 |
+| Epochs | 30 |
+| Optimizer | AdamW，lr=1e-3，weight_decay=5e-4 |
+| Scheduler | cosine，min_lr=1e-6 |
+| Warmup | 1000 batches |
+| Gradient clip | 1.0 |
+| AMP + torch.compile + gradient checkpointing | 是 |
+
+### 仅不同的配置
+
+| 配置 | Triplet | ArcFace |
+|------|---------|---------|
+| Loss | `--loss triplet --mining semi-hard` | `--loss arcface --num_classes 85742 --arcface_margin 0.5 --arcface_scale 64.0` |
+| 初始化 | from scratch | from scratch |
+| Resume | 无 | 无 |
+| EMA | 未启用 | 未启用 |
+| Freeze backbone | 无 | 无 |
+
+### 运行命令
+
+```bash
+bash scripts/run_resnet100_ms1mv2_arcface_scratch.sh
+```
+
+- 输出目录：`checkpoints/resnet100_ms1mv2_lmdb_p32k8_30ep_arcface`
+- 日志：`checkpoints/resnet100_ms1mv2_lmdb_p32k8_30ep_arcface/train.log`
+
+### 预期与风险
+
+- 预期：在完全相同的训练配置下，直接对比 Triplet semi-hard 与 ArcFace 对 ResNet100-IR 的影响。
+- 风险：ArcFace 通常需要 SGD + 大 lr（如 0.1）、大 batch 和更长训练才能达到公开论文 99%+；AdamW lr=1e-3 + batch 256 从头训练可能收敛较慢或最终性能不如 Triplet，但这是严格对照所需。
+
 ## 下一步
 
-- 等待实验 7（ResNet100-IR + ArcFace freeze1）结果，与实验 6 的 Triplet 结果严格对照。
-- 根据收敛情况决定是否进一步调整 LR、freeze epoch 数或 batch size。
+- 等待实验 8（ResNet100-IR + ArcFace from scratch）结果，与实验 6 的 Triplet 结果严格对照。
+- 如果前几个 epoch 出现 loss 爆炸或 LFW 快速崩塌，及时调整学习率或训练策略。
