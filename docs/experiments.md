@@ -341,7 +341,35 @@ bash scripts/run_resnet100_ms1mv2_arcface_scratch.sh
 - 预期：在完全相同的训练配置下，直接对比 Triplet semi-hard 与 ArcFace 对 ResNet100-IR 的影响。
 - 风险：ArcFace 通常需要 SGD + 大 lr（如 0.1）、大 batch 和更长训练才能达到公开论文 99%+；AdamW lr=1e-3 + batch 256 从头训练可能收敛较慢或最终性能不如 Triplet，但这是严格对照所需。
 
+## 实验 9：ResNet100-IR + ArcFace from scratch，effective batch 4× + lr 线性放大（进行中）
+
+**目标**：在实验 8 完全相同配置的基础上，**只改两个参数**：
+- `--accum_steps 4`：把 effective global batch 从 1024 放大到 4096（每卡 micro-batch 仍为 256，显存不变）；
+- `--lr 4e-3`：按 linear scaling rule 把 AdamW 学习率同步放大 4 倍。
+
+其他所有参数（模型、数据、P/K、epochs、scheduler、loss 超参等）与实验 8 保持一致。
+
+### 为什么这样改
+
+- 实验 8（`lr=1e-3，accum=1`）Epoch 1 后 LFW 仅 52.88%，head 学得太慢。
+- ArcFace 是 sample-to-class 的全局 softmax 目标，梯度噪声对 batch size 敏感；放大 batch 并线性放大 LR 是标准的“大 batch 训练”做法。
+- 直接增大 `--p` 会 OOM（当前每卡 256 张已用 21–24 GB），所以用梯度累积实现 effective batch 放大。
+
+### 运行命令
+
+```bash
+bash scripts/run_resnet100_ms1mv2_arcface_accum4.sh
+```
+
+- 输出目录：`checkpoints/resnet100_ms1mv2_lmdb_p32k8_accum4_arcface`
+- 日志：`checkpoints/resnet100_ms1mv2_lmdb_p32k8_accum4_arcface/train.log`
+
+### 当前状态
+
+- 已停止实验 8 的原始 `lr=1e-3` 运行。
+- 新任务已启动，Epoch 1 进行中。
+
 ## 下一步
 
-- 等待实验 8（ResNet100-IR + ArcFace from scratch）结果，与实验 6 的 Triplet 结果严格对照。
-- 如果前几个 epoch 出现 loss 爆炸或 LFW 快速崩塌，及时调整学习率或训练策略。
+- 等待实验 9 第一个 epoch 结束后的评测，看 LFW 是否能明显超过实验 8 的 52.88%。
+- 如果有效，继续跑完 30 epoch；如果仍不理想，再讨论是否切 SGD + step decay。
