@@ -364,12 +364,46 @@ bash scripts/run_resnet100_ms1mv2_arcface_accum4.sh
 - 输出目录：`checkpoints/resnet100_ms1mv2_lmdb_p32k8_accum4_arcface`
 - 日志：`checkpoints/resnet100_ms1mv2_lmdb_p32k8_accum4_arcface/train.log`
 
+### 结果
+
+| 阶段 | Train loss | Train acc | LFW(bin) | CFP-FP | AgeDB-30 | 备注 |
+|------|------------|-----------|----------|--------|----------|------|
+| Epoch 1 | 46.38 | 0.00% | 51.67% ± 1.08% | **63.66% ± 1.75%** | 50.10% ± 1.83% | CFP-FP 提升明显，LFW 未超越实验 8 |
+
+- CFP-FP 从实验 8 的 47.96% 提升到 63.66%，说明大 batch + 高 LR 对 front-profile 有帮助。
+- 但 LFW 仍只有 51.67%，train loss 没有更快下降，acc 仍为 0%，整体未达预期。
+- 已停止本实验，准备切换为 SGD + step decay + lr=0.1（实验 10）。
+
+## 实验 10：ResNet100-IR + ArcFace from scratch，SGD + lr=0.1 + step decay（进行中）
+
+**目标**：在实验 9 的基础上，**只改优化器和学习率调度**：
+- `--optimizer sgd`（momentum=0.9）
+- `--lr 1e-1`
+- `--scheduler step`（在总步数 50% 和 80% 处 lr ×0.1）
+
+其余所有参数（模型、数据、P/K、`accum_steps=4`、loss 超参、epochs 等）与实验 9 保持一致。
+
+### 为什么这样改
+
+- ArcFace 原始论文及 InsightFace 实现普遍采用 **SGD + lr=0.1 + step decay**。
+- 实验 8/9 用 AdamW 从头训练 ArcFace head 效果不佳，说明该配置不适合 ArcFace from scratch。
+- SGD 配合 step decay 通常比 AdamW + cosine 更能把 embedding 推到判别性更强的区域。
+
+### 运行命令
+
+```bash
+bash scripts/run_resnet100_ms1mv2_arcface_sgd.sh
+```
+
+- 输出目录：`checkpoints/resnet100_ms1mv2_lmdb_p32k8_sgd_arcface`
+- 日志：`checkpoints/resnet100_ms1mv2_lmdb_p32k8_sgd_arcface/train.log`
+
 ### 当前状态
 
-- 已停止实验 8 的原始 `lr=1e-3` 运行。
+- 已停止实验 9。
 - 新任务已启动，Epoch 1 进行中。
 
 ## 下一步
 
-- 等待实验 9 第一个 epoch 结束后的评测，看 LFW 是否能明显超过实验 8 的 52.88%。
-- 如果有效，继续跑完 30 epoch；如果仍不理想，再讨论是否切 SGD + step decay。
+- 重点监控实验 10 前 1–2 个 epoch 的 loss 稳定性和评测指标。
+- 如果 SGD lr=0.1 导致发散，再降到 5e-2 或 1e-2 重试。
