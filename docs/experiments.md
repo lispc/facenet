@@ -398,12 +398,55 @@ bash scripts/run_resnet100_ms1mv2_arcface_sgd.sh
 - 输出目录：`checkpoints/resnet100_ms1mv2_lmdb_p32k8_sgd_arcface`
 - 日志：`checkpoints/resnet100_ms1mv2_lmdb_p32k8_sgd_arcface/train.log`
 
+### 结果
+
+| 阶段 | Train loss | Train acc | LFW(bin) | CFP-FP | AgeDB-30 | 备注 |
+|------|------------|-----------|----------|--------|----------|------|
+| Epoch 1 | 55.77 | 0.00% | **63.60% ± 1.88%** | 54.43% ± 1.47% | 47.55% ± 1.43% | LFW 比 AdamW 好 |
+| Epoch 2 | 49.79 | 0.00% | **54.38% ± 1.95%** | 54.29% ± 1.08% | 48.12% ± 1.75% | LFW 回落，整体停滞 |
+
+- SGD + lr=0.1 能让 train loss 下降（55.77 → 49.79），但验证指标没有持续提升。
+- 主要问题：仍用 224×224 输入、128-D embedding、effective batch 4096，和标准 ArcFace 配置差距较大。
+- 已停止本实验，准备按标准 ArcFace 配置重启（实验 11）。
+
+## 实验 11：ResNet100-IR + ArcFace 标准对齐（进行中）
+
+**目标**：让配置尽可能接近 ArcFace / InsightFace 论文标准，核心改动：
+- 输入尺寸：`224×224` → **112×112**
+- Embedding dim：`128` → **512**
+- Global batch：`4096`（accum=4） → **512**（无 accum，每卡 64×2=128）
+- 关闭 gradient checkpointing
+- 保持 SGD lr=0.1、step scheduler、约 180k 总步数
+
+### 与标准 ArcFace 的对齐情况
+
+| 配置 | 标准 ArcFace | 实验 11 |
+|------|--------------|---------|
+| Backbone | ResNet100-IR | ResNet100-IR |
+| 输入尺寸 | 112×112 | **112×112** |
+| Embedding dim | 512 | **512** |
+| Global batch | 512 | **512** |
+| Optimizer | SGD, momentum=0.9, wd=5e-4 | SGD, momentum=0.9, wd=5e-4 |
+| Initial LR | 0.1 | **0.1** |
+| LR decay | step, 100k/160k iters | step（代码默认 50%/80% 总步数） |
+| 总步数 | ~180k | **~182k**（11376 steps × 16 epochs） |
+| Dropout | ~0.5 | 0.5 |
+
+### 运行命令
+
+```bash
+bash scripts/run_resnet100_ms1mv2_arcface_standard.sh
+```
+
+- 输出目录：`checkpoints/resnet100_ms1mv2_lmdb_p64k2_16ep_arcface_standard`
+- 日志：`checkpoints/resnet100_ms1mv2_lmdb_p64k2_16ep_arcface_standard/train.log`
+
 ### 当前状态
 
-- 已停止实验 9。
-- 新任务已启动，Epoch 1 进行中。
+- 已停止实验 10。
+- 新任务已启动。
 
 ## 下一步
 
-- 重点监控实验 10 前 1–2 个 epoch 的 loss 稳定性和评测指标。
-- 如果 SGD lr=0.1 导致发散，再降到 5e-2 或 1e-2 重试。
+- 监控实验 11 前 1–2 个 epoch 的 loss 和评测指标。
+- 这是目前最接近标准 ArcFace 的配置，预期应能显著超过之前的 AdamW/SGD 尝试。
