@@ -22,12 +22,12 @@
   - 运行脚本：`scripts/run_resnet100_ms1mv2_triplet.sh`。
   - 输出目录：`checkpoints/resnet100_ms1mv2_lmdb_p32k8_30ep_triplet`。
   - 7 epoch 最佳结果：**LFW 98.33% / CFP-FP 90.33% / AgeDB-30 90.00%**，显著优于 NN2。
-- **ResNet100-IR + ArcFace 对照实验已启动**：
-  - 从 ResNet100 Triplet `best.pth` 恢复，损失替换为 ArcFace。
-  - 第 1 epoch 冻结 backbone 只训练 head，第 2 epoch 起解冻全部参数。
-  - 运行脚本：`scripts/run_resnet100_ms1mv2_arcface_freeze1.sh`。
-  - 输出目录：`checkpoints/resnet100_ms1mv2_lmdb_p32k8_arcface_freeze1`。
-- 详细实验日志见 [`docs/experiments.md`](./experiments.md)。
+- **ResNet100-IR + ArcFace 标准对齐实验已结束（项目最终实验）**：
+  - 配置：112×112 输入、512-D embedding、global batch 512、SGD lr=0.1 + step decay、16 epochs。
+  - 最佳 checkpoint：`checkpoints/resnet100_ms1mv2_lmdb_p64k2_16ep_arcface_standard/best.pth`（Epoch 12）。
+  - 最佳指标：LFW **99.52%** / CFP-FP **93.70%** / AgeDB-30 **94.92%**。
+  - 最后完成 epoch（Epoch 13）：LFW **99.50%** / CFP-FP **94.56%** / AgeDB-30 **95.65%**。
+- **项目已结束**，详细实验日志与结论见 [`docs/experiments.md`](./experiments.md)。
 
 ---
 

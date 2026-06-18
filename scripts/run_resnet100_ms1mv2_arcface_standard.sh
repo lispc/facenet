@@ -44,4 +44,4 @@ torchrun --nproc_per_node=4 train.py \
   --cfp_fp_bin ./data/casia-webface/eval/cfp_fp.bin \
   --agedb_30_bin ./data/casia-webface/eval/agedb_30.bin \
   --output_dir "${OUTPUT_DIR}" \
-  "$@" 2>&1 | tee "${OUTPUT_DIR}/train.log"
+  "$@" 2>&1 | tee -a "${OUTPUT_DIR}/train.log"

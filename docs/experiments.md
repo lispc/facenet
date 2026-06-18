@@ -175,7 +175,7 @@ Epoch 4 LFW 回落至 97.52%，整体进入平台期，因此停止并切换为 
 
 ---
 
-## 实验 6：ResNet100-IR + Triplet 单变量对照（进行中）
+## 实验 6：ResNet100-IR + Triplet 单变量对照（已完成）
 
 **目标**：只把 backbone 从 NN2 换成 ResNet100-IR，其余（Triplet Loss、MS1MV2 数据、224×224、128-D embedding、AdamW lr=1e-3、cosine scheduler 等）保持不变，验证 backbone 容量的影响。
 
@@ -281,17 +281,11 @@ bash scripts/run_resnet100_ms1mv2_arcface_freeze1.sh
 
 ---
 
-## 实验 8：ResNet100-IR + ArcFace（from scratch）单变量对照（进行中）
+## 实验 8：ResNet100-IR + ArcFace（from scratch）单变量对照（已停止）
 
 **目标**：与实验 6 的 ResNet100-IR + Triplet 做严格单变量对照，**仅把 loss 从 Triplet 替换为 ArcFace**，其余配置（网络、数据、输入尺寸、embedding_dim、batch size、优化器、LR、scheduler、epochs 等）完全一致。
 
-### 启动记录
-
-- 2025-06-17：首次启动，因后台任务默认 600 秒超时被中断（当时已跑到 Epoch 1 step 240，loss 约 44.6）。
-- 2025-06-17：使用无超时后台任务重新启动。
-- 当前状态：**Epoch 2 进行中**（`82 / 4000`），loss 在 42–44 之间震荡。
-
-### 与实验 6 完全一致的配置
+### 配置
 
 | 配置 | 值 |
 |------|-----|
@@ -326,34 +320,24 @@ bash scripts/run_resnet100_ms1mv2_arcface_scratch.sh
 - 输出目录：`checkpoints/resnet100_ms1mv2_lmdb_p32k8_30ep_arcface`
 - 日志：`checkpoints/resnet100_ms1mv2_lmdb_p32k8_30ep_arcface/train.log`
 
-### 当前结果
+### 结果
 
 | 阶段 | Train loss | Train acc | LFW(bin) | CFP-FP | AgeDB-30 | 备注 |
 |------|------------|-----------|----------|--------|----------|------|
 | Epoch 1 | 43.86 | 0.00% | **52.88% ± 2.03%** | 47.96% ± 1.11% | 47.70% ± 1.23% | head 刚开始学习 |
-| Epoch 2（进行中） | — | — | — | — | — | step 82，loss ~43.2 |
 
 - 与 Triplet 实验 Epoch 1 的 LFW **96.82%** 相比，ArcFace from scratch 起点明显更低，符合随机初始化分类头 + 小 batch 的预期。
-- `best.pth` 当前为 Epoch 1 检查点（LFW 52.88%）。
+- 已停止，进入实验 9/10/11 尝试更大 batch 与 SGD。
 
-### 预期与风险
+---
 
-- 预期：在完全相同的训练配置下，直接对比 Triplet semi-hard 与 ArcFace 对 ResNet100-IR 的影响。
-- 风险：ArcFace 通常需要 SGD + 大 lr（如 0.1）、大 batch 和更长训练才能达到公开论文 99%+；AdamW lr=1e-3 + batch 256 从头训练可能收敛较慢或最终性能不如 Triplet，但这是严格对照所需。
-
-## 实验 9：ResNet100-IR + ArcFace from scratch，effective batch 4× + lr 线性放大（进行中）
+## 实验 9：ResNet100-IR + ArcFace from scratch，effective batch 4× + lr 线性放大（已停止）
 
 **目标**：在实验 8 完全相同配置的基础上，**只改两个参数**：
 - `--accum_steps 4`：把 effective global batch 从 1024 放大到 4096（每卡 micro-batch 仍为 256，显存不变）；
 - `--lr 4e-3`：按 linear scaling rule 把 AdamW 学习率同步放大 4 倍。
 
 其他所有参数（模型、数据、P/K、epochs、scheduler、loss 超参等）与实验 8 保持一致。
-
-### 为什么这样改
-
-- 实验 8（`lr=1e-3，accum=1`）Epoch 1 后 LFW 仅 52.88%，head 学得太慢。
-- ArcFace 是 sample-to-class 的全局 softmax 目标，梯度噪声对 batch size 敏感；放大 batch 并线性放大 LR 是标准的“大 batch 训练”做法。
-- 直接增大 `--p` 会 OOM（当前每卡 256 张已用 21–24 GB），所以用梯度累积实现 effective batch 放大。
 
 ### 运行命令
 
@@ -374,7 +358,7 @@ bash scripts/run_resnet100_ms1mv2_arcface_accum4.sh
 - 但 LFW 仍只有 51.67%，train loss 没有更快下降，acc 仍为 0%，整体未达预期。
 - 已停止本实验，准备切换为 SGD + step decay + lr=0.1（实验 10）。
 
-## 实验 10：ResNet100-IR + ArcFace from scratch，SGD + lr=0.1 + step decay（进行中）
+## 实验 10：ResNet100-IR + ArcFace from scratch，SGD + lr=0.1 + step decay（已停止）
 
 **目标**：在实验 9 的基础上，**只改优化器和学习率调度**：
 - `--optimizer sgd`（momentum=0.9）
@@ -382,12 +366,6 @@ bash scripts/run_resnet100_ms1mv2_arcface_accum4.sh
 - `--scheduler step`（在总步数 50% 和 80% 处 lr ×0.1）
 
 其余所有参数（模型、数据、P/K、`accum_steps=4`、loss 超参、epochs 等）与实验 9 保持一致。
-
-### 为什么这样改
-
-- ArcFace 原始论文及 InsightFace 实现普遍采用 **SGD + lr=0.1 + step decay**。
-- 实验 8/9 用 AdamW 从头训练 ArcFace head 效果不佳，说明该配置不适合 ArcFace from scratch。
-- SGD 配合 step decay 通常比 AdamW + cosine 更能把 embedding 推到判别性更强的区域。
 
 ### 运行命令
 
@@ -409,7 +387,7 @@ bash scripts/run_resnet100_ms1mv2_arcface_sgd.sh
 - 主要问题：仍用 224×224 输入、128-D embedding、effective batch 4096，和标准 ArcFace 配置差距较大。
 - 已停止本实验，准备按标准 ArcFace 配置重启（实验 11）。
 
-## 实验 11：ResNet100-IR + ArcFace 标准对齐（进行中）
+## 实验 11：ResNet100-IR + ArcFace 标准对齐（已结束）
 
 **目标**：让配置尽可能接近 ArcFace / InsightFace 论文标准，核心改动：
 - 输入尺寸：`224×224` → **112×112**
@@ -453,22 +431,30 @@ bash scripts/run_resnet100_ms1mv2_arcface_standard.sh
 | 6 | 98.58% ± 0.40% | 88.20% ± 0.85% | 89.73% ± 1.46% | — |
 | 7 | 98.78% ± 0.33% | 88.24% ± 1.01% | 89.47% ± 0.90% | — |
 | 8 | 98.72% ± 0.24% | 87.81% ± 1.47% | 89.70% ± 1.05% | LFW 略降，CFP 略降，AgeDB 微升 |
-| 9 | **99.43% ± 0.30%** | **92.77% ± 0.94%** | **93.78% ± 0.74%** | lr 降到 0.01 后全面暴涨，全部刷新 best |
+| 9 | 99.43% ± 0.30% | 92.77% ± 0.94% | 93.78% ± 0.74% | lr 降到 0.01 后全面暴涨 |
+| 10 | 99.32% ± 0.37% | 93.26% ± 0.93% | 94.50% ± 0.92% | LFW 微降，CFP/AgeDB 继续提升 |
+| 11 | 99.52% ± 0.30% | 93.56% ± 0.66% | 94.80% ± 0.71% | 三项全部刷新 best |
+| 12 | 99.52% ± 0.22% | 93.70% ± 0.67% | 94.92% ± 0.60% | LFW 持平，CFP/AgeDB 继续微升 |
+| 13 | 99.50% ± 0.26% | 94.56% ± 0.58% | 95.65% ± 0.47% | lr 降到 1e-3，CFP/AgeDB 大幅提升 |
 
 - Epoch 8 平均 loss：33.98，lr 1.00e-1；Epoch 9 平均 loss：23.83，lr 1.00e-2。
-- Epoch 9 内 loss 从开头 ~33.8 一路降到结尾 ~16.3，降幅约 17 个点。
-- 当前 Epoch 10 step 5223/11376（约 46%），实时 loss ≈ **19.3**，本 epoch 平均约 17.5；lr 仍为 1.00e-2。
-- 训练 acc：Epoch 9 上升到 **0.71%**（之前一直 ~0.01%），说明类别区分度开始显现。
+- Epoch 10–13 平均 loss/acc：24.78/1.30%、16.41/1.93%、17.16/1.44%、17.02/1.54%。
 - 与 Triplet best 对比：
   - Triplet：LFW 98.33% / CFP-FP 90.33% / AgeDB-30 90.00%
-  - ArcFace Epoch 9：LFW 99.43% / CFP-FP 92.77% / AgeDB-30 93.78%（全面大幅超越）
+  - ArcFace Epoch 13：LFW 99.50% / CFP-FP 94.56% / AgeDB-30 95.65%（全面大幅超越）
 
-### 当前状态
+### 最终状态
 
-- 实验 11 正在 Epoch 10 训练中，lr 0.01。
-- Epoch 9 在 lr 第一次衰减后取得巨大提升，三个测试集全部刷新最高，且 loss 仍在下降。
+- **实验 11 已结束**，训练在 Epoch 14 约 6% 处被手动停止。
+- **最佳 checkpoint**：`checkpoints/resnet100_ms1mv2_lmdb_p64k2_16ep_arcface_standard/best.pth`（Epoch 12，按 LFW 准确率保存）。
+  - Epoch 12 指标：LFW **99.52%** / CFP-FP **93.70%** / AgeDB-30 **94.92%**
+- **最后完成 epoch（Epoch 13）指标**：LFW **99.50%** / CFP-FP **94.56%** / AgeDB-30 **95.65%**
+- 结论：在标准对齐的 ArcFace 配置下，ResNet100-IR 在 MS1MV2 上取得了远超 Triplet 的性能；输入 112×112、embedding 512、global batch 512、SGD+step decay 是关键配置。
 
-## 下一步
+### 项目结论
 
-- 继续跑完剩余 6 个 epoch（至 Epoch 16）。
-- 关注 Epoch 10–11 是否继续提升，以及第二次 lr decay（0.01 → 0.001，约在 Epoch 13 初）后的表现。
+- **Input size 112×112 足够**：相比之前 224×224，速度更快、显存更省，且最终指标达到 LFW 99.5%+。
+- **ArcFace 需要大 embedding dim 与大 batch**：之前 128-D / batch 256 的 ArcFace 实验失败；改为 512-D / batch 512 后性能突破。
+- **SGD + lr=0.1 + step decay 是 ArcFace 的关键**：AdamW + cosine 在该数据上无法让 ArcFace head 从头学习。
+- **lr decay 后的提升非常明显**：第一次 decay（0.1→0.01）后 Epoch 9 暴涨；第二次 decay（0.01→0.001）后 Epoch 13 CFP/AgeDB 继续提升。
+- 项目到此结束，后续无需再跑 Epoch 14–16。
