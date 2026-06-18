@@ -452,19 +452,21 @@ bash scripts/run_resnet100_ms1mv2_arcface_standard.sh
 | 5 | 98.52% ± 0.28% | 86.19% ± 1.13% | 89.03% ± 0.91% | — |
 | 6 | 98.58% ± 0.40% | 88.20% ± 0.85% | 89.73% ± 1.46% | — |
 | 7 | **98.78% ± 0.33%** | 88.24% ± 1.01% | 89.47% ± 0.90% | best（按 LFW） |
+| 8 | 98.72% ± 0.24% | 87.81% ± 1.47% | 89.70% ± 1.05% | LFW 略降，CFP 略降，AgeDB 微升 |
 
-- 当前（Epoch 8，step 2574/11376，约 23%）：loss ≈ 34.0，速度 ~2.78 it/s。
+- Epoch 8 平均 loss：33.98，lr 仍为 1.00e-1。
+- Epoch 9 开始 lr 降至 **1.00e-2**（第一次 step decay）；当前 Epoch 9 step 5814/11376（约 51%），实时 loss ≈ **24.2**，本 epoch 内 loss 从 ~34 快速降到 ~23。
 - 与 Triplet 同阶段对比：
   - Triplet Epoch 7：LFW 98.33% / CFP-FP 90.33% / AgeDB-30 90.00%
-  - ArcFace Epoch 7：LFW 98.78%（更高） / CFP-FP 88.24% / AgeDB-30 89.47%（略低）
+  - ArcFace Epoch 8：LFW 98.72%（更高） / CFP-FP 87.81% / AgeDB-30 89.70%（后两者仍略低）
 - 训练 acc 仍为 ~0.00%–0.78%，因为 batch 内 85,742 类中只出现 64 个身份，top-1 命中极少；这是数量级效应，不影响收敛。
 
 ### 当前状态
 
-- 实验 11 正在 Epoch 8 训练中。
-- LFW 已超越 Triplet baseline（98.78% vs 98.33%），CFP-FP / AgeDB-30 略低于 Triplet，但仍在稳步上升。
+- 实验 11 正在 Epoch 9 训练中，lr 已从 0.1 降到 0.01。
+- LFW 仍领先 Triplet baseline；lr 下降后 loss 出现明显下降，评测指标待 Epoch 9 结束后观察。
 
 ## 下一步
 
-- 继续跑完剩余 9 个 epoch（至 Epoch 16）。
-- 监控 LFW/CFP/AgeDB 是否继续提升，并记录最终 best 指标。
+- 继续跑完剩余 7 个 epoch（至 Epoch 16）。
+- 重点观察 Epoch 9 评测指标是否继续提升，以及第二次 lr decay（0.01 → 0.001）后的表现。
